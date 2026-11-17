@@ -1,0 +1,35 @@
+name: validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  yaml:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # A file that fails to parse would stop every service that imports it from starting.
+      - name: Every config file is valid YAML
+        run: |
+          pip install --quiet pyyaml
+          python - <<'PY'
+          import glob, sys, yaml
+          bad = 0
+          for path in sorted(glob.glob("*.yml")):
+              try:
+                  list(yaml.safe_load_all(open(path, encoding="utf-8")))
+              except yaml.YAMLError as e:
+                  print(f"::error file={path}::{e}")
+                  bad += 1
+          sys.exit(1 if bad else 0)
+          PY
