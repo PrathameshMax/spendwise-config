@@ -1,20 +1,38 @@
 name: validate
 
+# A configuration repository is where credentials most often leak, so every
+# change is secret-scanned before the YAML checks. Real secrets belong in Vault;
+# files here may only reference them.
+
 on:
   push:
     branches: [main]
   pull_request:
 
-permissions:
-  contents: read
+permissions: {}
+
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  secret-scan:
+    uses: PrathameshMax/spendwise-ci/.github/workflows/secret-scan.yml@v1
+    permissions:
+      contents: read
+      security-events: write
+
   yaml:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.12'
 
@@ -31,5 +49,38 @@ jobs:
               except yaml.YAMLError as e:
                   print(f"::error file={path}::{e}")
                   bad += 1
+          sys.exit(1 if bad else 0)
+          PY
+
+      # A password, secret or token must be a ${...} placeholder resolved from
+      # Vault or the environment at runtime. In a prod profile the placeholder
+      # may not carry a fallback value either: a missing secret must stop the
+      # service from starting, not let it run on a development default.
+      - name: No literal credentials in config
+        run: |
+          python - <<'PY'
+          import glob, re, sys, yaml
+          KEY = re.compile(r"(password|secret|token|credentials|api[-_]?key|private[-_]?key)$", re.I)
+          DEFAULTED = re.compile(r"^\$\{[^:}]+:.+\}$")
+          bad = 0
+          def walk(node, path, file):
+              global bad
+              if isinstance(node, dict):
+                  for k, v in node.items():
+                      walk(v, f"{path}.{k}" if path else str(k), file)
+              elif isinstance(node, list):
+                  for i, v in enumerate(node):
+                      walk(v, f"{path}[{i}]", file)
+              elif isinstance(node, str) and KEY.search(path.split(".")[-1]) and node.strip():
+                  value = node.strip()
+                  if not value.startswith("${"):
+                      print(f"::error file={file}::{path} holds a literal value; resolve it from Vault or the environment instead")
+                      bad += 1
+                  elif file.endswith("-prod.yml") and DEFAULTED.match(value):
+                      print(f"::error file={file}::{path} has a fallback value in a prod profile")
+                      bad += 1
+          for f in sorted(glob.glob("*.yml")):
+              for doc in yaml.safe_load_all(open(f, encoding="utf-8")):
+                  walk(doc, "", f)
           sys.exit(1 if bad else 0)
           PY
